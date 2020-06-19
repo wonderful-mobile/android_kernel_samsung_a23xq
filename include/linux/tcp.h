@@ -226,7 +226,7 @@ struct tcp_sock {
 		fastopen_no_cookie:1, /* Allow send/recv SYN+data without a cookie */
 		is_sack_reneg:1,    /* in recovery from loss with SACK reneg? */
 		fast_ack_mode:1,    /* ack ASAP if >1 rcv_mss received? */
-		unused:1;
+		tlp_orig_data_app_limited:1; /* app-limited before TLP rtx? */
 	u8	nonagle     : 4,/* Disable Nagle algorithm?             */
 		thin_lto    : 1,/* Use linear timeouts for thin streams */
 		recvmsg_inq : 1,/* Indicate # of bytes in queue upon recvmsg */
