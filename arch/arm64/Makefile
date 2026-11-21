@@ -68,6 +68,10 @@ KBUILD_AFLAGS	+= $(lseinstr) $(brokengasinst) $(compat_vdso)
 KBUILD_CFLAGS	+= $(call cc-option,-mabi=lp64)
 KBUILD_AFLAGS	+= $(call cc-option,-mabi=lp64)
 
+# Snapdragon 695: 2x Cortex-A78 + 6x Cortex-A55 (armv8.2-a). Tune for the
+# A55 baseline, which is safe to run on the A78 cores as well.
+KBUILD_CFLAGS	+= $(call cc-option,-mcpu=cortex-a55)
+
 ifeq ($(CONFIG_STACKPROTECTOR_PER_TASK),y)
 prepare: stack_protector_prepare
 stack_protector_prepare: prepare0

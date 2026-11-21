@@ -1823,18 +1823,6 @@ static int lpm_probe(struct platform_device *pdev)
 	struct hrtimer *cpu_histtimer;
 	struct kobject *module_kobj = NULL;
 
-#ifdef CONFIG_ARCH_BLAIR
-	int i;
-	struct cpufreq_policy policy;
-	const struct {
-		int cpu;
-		int freq;
-	} eff_table[] = {
-		0, 1708800,
-		6, 1228800,
-	};
-#endif
-
 	get_online_cpus();
 	lpm_root_node = lpm_of_parse_cluster(pdev);
 
