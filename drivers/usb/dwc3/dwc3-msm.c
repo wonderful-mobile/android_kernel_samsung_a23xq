@@ -4578,7 +4578,7 @@ static ssize_t mode_store(struct device *dev, struct device_attribute *attr,
 			return -EINVAL;
 		}
 
-#ifdef CONFIG_USB_NOTIFIER
+#if IS_ENABLED(CONFIG_USB_NOTIFY_LAYER)
 		if (is_blocked(get_otg_notify(), NOTIFY_BLOCK_TYPE_CLIENT)) {
 			dev_err(dev, "blocked peripheral mode\n");
 			return -EINVAL;
@@ -4587,7 +4587,7 @@ static ssize_t mode_store(struct device *dev, struct device_attribute *attr,
 		mdwc->vbus_active = true;
 		mdwc->id_state = DWC3_ID_FLOAT;
 	} else if (sysfs_streq(buf, "host")) {
-#ifdef CONFIG_USB_NOTIFIER
+#if IS_ENABLED(CONFIG_USB_NOTIFY_LAYER)
 		if (is_blocked(get_otg_notify(), NOTIFY_BLOCK_TYPE_HOST)) {
 			dev_err(dev, "blocked host mode\n");
 			return -EINVAL;

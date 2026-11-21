@@ -785,7 +785,7 @@
 					phandle = <0x9c>;
 
 					current_group_1 {
-						cable_number = <0x13 0x15 0x16 0x2b 0x17>;
+						cable_number = <0x13 0x15 0x16 0x17>;
 						input_current = <0x1f4>;
 						charging_current = <0x1f4>;
 					};
