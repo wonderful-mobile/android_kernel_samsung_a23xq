@@ -17,16 +17,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - variant: Vanilla
-            args: ""
-          - variant: KernelSU
-            args: "--root ksu"
-          - variant: KernelSU-Next
-            args: "--root ksun"
-          - variant: SukiSU
-            args: "--root sukisu"
-          - variant: SukiSU-SUSFS
-            args: "--root sukisu --susfs"
+          - { variant: Vanilla,             args: "" }
+          - { variant: KernelSU-Next,       args: "--root ksun" }
+          - { variant: KernelSU-Next-SUSFS, args: "--root ksun --susfs" }
+          - { variant: SukiSU,              args: "--root sukisu" }
+          - { variant: SukiSU-SUSFS,        args: "--root sukisu --susfs" }
+          - { variant: BakaSU,              args: "--root bakasu" }
+          - { variant: BakaSU-SUSFS,        args: "--root bakasu --susfs" }
 
     steps:
       - uses: actions/checkout@v4

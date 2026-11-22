@@ -37,17 +37,19 @@ cat <<EOF
   Which root manager do you want built into the kernel?
 
     1) None              plain kernel, no root
-    2) KernelSU          the original KernelSU, non-GKI driver
-    3) KernelSU-Next     KernelSU fork with extra module features
-    4) SukiSU            KernelSU fork, the only one here with SUSFS
+    2) KernelSU-Next     KernelSU fork, a good default
+    3) SukiSU            KernelSU fork
+    4) BakaSU            KernelSU fork
+
+  (Official KernelSU only supports GKI 2.0 kernels, Linux 5.10 and newer.)
 
 EOF
-ask "Choose 1-4" 3
+ask "Choose 1-4" 2
 case "$REPLY" in
 1) ROOT=none ;;
-2) ROOT=ksu ;;
-3) ROOT=ksun ;;
-4) ROOT=sukisu ;;
+2) ROOT=ksun ;;
+3) ROOT=sukisu ;;
+4) ROOT=bakasu ;;
 *) echo "Please choose 1, 2, 3 or 4." >&2; exit 1 ;;
 esac
 

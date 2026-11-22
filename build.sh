@@ -33,10 +33,14 @@ AK3_REF="${AK3_REF:-41f04bdb4ee30a44e429c2c1131d5e8bb32b15f1}"
 # Root drivers, pinned to reviewed commits. Override with e.g. KSUN_REF=legacy.
 KSUN_REPO="https://github.com/KernelSU-Next/KernelSU-Next"
 KSUN_REF="${KSUN_REF:-e5f5ec998de88b9fc43c62cff8f7ae12d3f4800a}" # legacy branch
-KSU_REPO="https://github.com/backslashxx/KernelSU" # upstream-compatible non-GKI driver
-KSU_REF="${KSU_REF:-9a08f36d37b053392c52b112edb951c5a8ec32ff}" # master, v3.3.1+55
+BAKASU_REPO="https://github.com/Baka-SU/BakaSU"
+BAKASU_REF="${BAKASU_REF:-2734e0bc155759955880f5fb99be640fc5b92156}" # main, SUSFS built in
 SUKISU_REPO="https://github.com/SukiSU-Nova/SukiSU-Nova"
 SUKISU_REF="${SUKISU_REF:-4bec532dd447e2852aa8932afa768255350c103a}" # builtin, v3.0.0
+# SUSFS-enabled KernelSU-Next driver, used with --susfs. SukiSU and BakaSU
+# have SUSFS built in.
+KSUN_SUSFS_REPO="https://github.com/sidex15/KernelSU-Next"
+KSUN_SUSFS_REF="${KSUN_SUSFS_REF:-d999a2aff11575c6e2f520129ecffb7c6058fb02}" # legacy-susfs-v2
 
 SUSFS_CONFIGS="KSU_SUSFS KSU_SUSFS_SUS_PATH KSU_SUSFS_SUS_MOUNT KSU_SUSFS_SUS_KSTAT
 KSU_SUSFS_SPOOF_UNAME KSU_SUSFS_ENABLE_LOG KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS
@@ -75,7 +79,7 @@ Usage: ./build.sh [options]
                         none    no root (default)
                         ksun    KernelSU-Next
                         sukisu  SukiSU
-                        ksu     KernelSU (backslashxx non-GKI driver, official manager API)
+                        bakasu  BakaSU
   -s, --susfs         add SUSFS (only with: $SUSFS_SUPPORTED)
   -j, --jobs N        parallel jobs (default: $(nproc))
       --lto MODE      none, thin or full (default: none)
@@ -121,7 +125,7 @@ case "$ROOT" in
 none) VARIANT="Vanilla" ;;
 ksun) VARIANT="KernelSU-Next" ;;
 sukisu) VARIANT="SukiSU" ;;
-ksu) VARIANT="KernelSU" ;;
+bakasu) VARIANT="BakaSU" ;;
 esac
 $SUSFS && VARIANT="$VARIANT-SUSFS"
 
@@ -175,6 +179,7 @@ fetch_repo() { # fetch_repo <url> <ref> <dir>
 
 APPLIED_PATCHES=()
 DRIVER_LINKED=false
+DRIVER_REF=""
 
 restore_tree() {
 	local i
@@ -209,26 +214,33 @@ apply_patch_dir() { # apply_patch_dir <dir>
 }
 
 setup_root() {
-	local url ref
+	local url ref drv="$ROOT"
 	case "$ROOT" in
 	none) return 0 ;;
 	ksun) url="$KSUN_REPO" ref="$KSUN_REF" ;;
 	sukisu) url="$SUKISU_REPO" ref="$SUKISU_REF" ;;
-	ksu) url="$KSU_REPO" ref="$KSU_REF" ;;
+	bakasu) url="$BAKASU_REPO" ref="$BAKASU_REF" ;;
 	esac
+	# KernelSU-Next needs a separate SUSFS-enabled driver.
+	if $SUSFS; then
+		case "$ROOT" in
+		ksun) url="$KSUN_SUSFS_REPO" ref="$KSUN_SUSFS_REF" drv="ksun-susfs" ;;
+		esac
+	fi
+	DRIVER_REF="$url@$ref"
 
-	info "Fetching $VARIANT driver ($ROOT @ ${ref:0:12})"
-	fetch_repo "$url" "$ref" "$WORK/root/$ROOT"
+	info "Fetching $VARIANT driver ($drv @ ${ref:0:12})"
+	fetch_repo "$url" "$ref" "$WORK/root/$drv"
 
 	# Small fixes to the driver itself, e.g. for building on older kernels.
 	local p
-	for p in "$SRC/wonderful/patches/driver/$ROOT"/*.patch; do
+	for p in "$SRC/wonderful/patches/driver/$drv"/*.patch; do
 		[ -e "$p" ] || continue
 		info "Applying ${p#"$SRC"/} to the driver"
-		git -C "$WORK/root/$ROOT" apply "$p" || die "${p#"$SRC"/} does not apply to $ROOT @ ${ref:0:12}"
+		git -C "$WORK/root/$drv" apply "$p" || die "${p#"$SRC"/} does not apply to $drv @ ${ref:0:12}"
 	done
 
-	ln -sfn "../.wonderful/root/$ROOT/kernel" drivers/kernelsu
+	ln -sfn "../.wonderful/root/$drv/kernel" drivers/kernelsu
 	printf 'obj-$(CONFIG_KSU) += kernelsu/\n' >>drivers/Makefile
 	printf 'source "drivers/kernelsu/Kconfig"\n' >>drivers/Kconfig
 	DRIVER_LINKED=true
@@ -267,16 +279,23 @@ configure() {
 	none) ;;
 	ksun) kconfig --enable KSU --enable KSU_MANUAL_HOOK ;;
 	sukisu) kconfig --enable KSU --disable KPM ;;
-	ksu) kconfig --enable KSU --enable KSU_TAMPER_SYSCALL_TABLE ;;
+	bakasu)
+		# BakaSU picks its hook method in a choice: manual, or SUSFS inline hooks.
+		if $SUSFS; then
+			kconfig --enable KSU --disable KSU_MANUAL_HOOK --disable KSU_TRACEPOINT_HOOK --enable KSU_SUSFS
+		else
+			kconfig --enable KSU --disable KSU_TRACEPOINT_HOOK --enable KSU_MANUAL_HOOK
+		fi
+		;;
 	esac
 
 	local c
-	if [ "$ROOT" = sukisu ]; then
-		if $SUSFS; then
-			for c in $SUSFS_CONFIGS; do kconfig --enable "$c"; done
-		else
-			kconfig --disable KSU_SUSFS
-		fi
+	if $SUSFS; then
+		for c in $SUSFS_CONFIGS; do kconfig --enable "$c"; done
+		# SUSFS v2 leaves unmounting to the root driver itself.
+		kconfig --disable KSU_SUSFS_TRY_UMOUNT
+	elif [ "$ROOT" = sukisu ]; then
+		kconfig --disable KSU_SUSFS
 	fi
 
 	case "$LTO" in
@@ -319,7 +338,7 @@ Wonderful Kernel $PROJECT_VERSION for $DEVICE_NAME ($DEVICE)
 Variant:  $VARIANT
 Kernel:   $release
 Source:   $sha
-Root:     $ROOT $(case $ROOT in ksun) echo "@ $KSUN_REF" ;; sukisu) echo "@ $SUKISU_REF" ;; esac)
+Root:     $ROOT ${DRIVER_REF:-}
 SUSFS:    $SUSFS
 Built:    $(date -u +'%Y-%m-%d %H:%M UTC')
 EOF
