@@ -1,7 +1,7 @@
 name: Build Wonderful Kernel
 
 # Manual runs build every variant from the chosen branch and upload them as
-# workflow artifacts. Pushing a tag like v0.8 also publishes a GitHub release
+# workflow artifacts. Pushing a tag like v0.9 also publishes a GitHub release
 # with fixed file names, which the install guide on the website links to:
 #   Wonderful-<device>-<variant>.zip
 
