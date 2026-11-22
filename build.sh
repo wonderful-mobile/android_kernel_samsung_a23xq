@@ -33,6 +33,8 @@ AK3_REF="${AK3_REF:-41f04bdb4ee30a44e429c2c1131d5e8bb32b15f1}"
 # Root drivers, pinned to reviewed commits. Override with e.g. KSUN_REF=legacy.
 KSUN_REPO="https://github.com/KernelSU-Next/KernelSU-Next"
 KSUN_REF="${KSUN_REF:-e5f5ec998de88b9fc43c62cff8f7ae12d3f4800a}" # legacy branch
+KSU_REPO="https://github.com/backslashxx/KernelSU" # upstream-compatible non-GKI driver
+KSU_REF="${KSU_REF:-9a08f36d37b053392c52b112edb951c5a8ec32ff}" # master, v3.3.1+55
 SUKISU_REPO="https://github.com/SukiSU-Nova/SukiSU-Nova"
 SUKISU_REF="${SUKISU_REF:-4bec532dd447e2852aa8932afa768255350c103a}" # builtin, v3.0.0
 
@@ -73,6 +75,7 @@ Usage: ./build.sh [options]
                         none    no root (default)
                         ksun    KernelSU-Next
                         sukisu  SukiSU
+                        ksu     KernelSU (backslashxx non-GKI driver, official manager API)
   -s, --susfs         add SUSFS (only with: $SUSFS_SUPPORTED)
   -j, --jobs N        parallel jobs (default: $(nproc))
       --lto MODE      none, thin or full (default: none)
@@ -118,6 +121,7 @@ case "$ROOT" in
 none) VARIANT="Vanilla" ;;
 ksun) VARIANT="KernelSU-Next" ;;
 sukisu) VARIANT="SukiSU" ;;
+ksu) VARIANT="KernelSU" ;;
 esac
 $SUSFS && VARIANT="$VARIANT-SUSFS"
 
@@ -210,6 +214,7 @@ setup_root() {
 	none) return 0 ;;
 	ksun) url="$KSUN_REPO" ref="$KSUN_REF" ;;
 	sukisu) url="$SUKISU_REPO" ref="$SUKISU_REF" ;;
+	ksu) url="$KSU_REPO" ref="$KSU_REF" ;;
 	esac
 
 	info "Fetching $VARIANT driver ($ROOT @ ${ref:0:12})"
@@ -262,6 +267,7 @@ configure() {
 	none) ;;
 	ksun) kconfig --enable KSU --enable KSU_MANUAL_HOOK ;;
 	sukisu) kconfig --enable KSU --disable KPM ;;
+	ksu) kconfig --enable KSU --enable KSU_TAMPER_SYSCALL_TABLE ;;
 	esac
 
 	local c

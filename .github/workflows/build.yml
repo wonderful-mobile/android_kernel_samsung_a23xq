@@ -19,6 +19,8 @@ jobs:
         include:
           - variant: Vanilla
             args: ""
+          - variant: KernelSU
+            args: "--root ksu"
           - variant: KernelSU-Next
             args: "--root ksun"
           - variant: SukiSU
