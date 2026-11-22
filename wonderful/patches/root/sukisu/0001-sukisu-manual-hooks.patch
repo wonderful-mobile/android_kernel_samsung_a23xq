@@ -1,0 +1,58 @@
+diff --git a/fs/read_write.c b/fs/read_write.c
+index 6656caffe..8bf553f68 100644
+--- a/fs/read_write.c
++++ b/fs/read_write.c
+@@ -602,15 +602,16 @@ ssize_t ksys_read(unsigned int fd, char __user *buf, size_t count)
+ }
+ 
+ #ifdef CONFIG_KSU
+-extern bool ksu_init_rc_hook;
+-extern void ksu_handle_sys_read(unsigned int fd);
++extern bool ksu_vfs_read_hook;
++extern int ksu_handle_sys_read(unsigned int fd, char __user **buf_ptr,
++			       size_t *count_ptr);
+ #endif
+ 
+ SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)
+ {
+ #ifdef CONFIG_KSU
+-	if (unlikely(ksu_init_rc_hook))
+-		ksu_handle_sys_read(fd);
++	if (unlikely(ksu_vfs_read_hook))
++		ksu_handle_sys_read(fd, &buf, &count);
+ #endif
+ 	return ksys_read(fd, buf, count);
+ }
+diff --git a/fs/stat.c b/fs/stat.c
+index 127118b4e..40ad83ff8 100755
+--- a/fs/stat.c
++++ b/fs/stat.c
+@@ -392,8 +392,8 @@ SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,
+ #endif
+ 
+ #ifdef CONFIG_KSU
+-extern bool ksu_init_rc_hook;
+-extern void ksu_handle_newfstat_ret(unsigned int *fd, struct stat __user **statbuf_ptr);
++extern bool ksu_vfs_read_hook;
++extern void ksu_handle_vfs_fstat(int fd, loff_t *kstat_size_ptr);
+ #endif
+ 
+ SYSCALL_DEFINE2(newfstat, unsigned int, fd, struct stat __user *, statbuf)
+@@ -401,13 +401,13 @@ SYSCALL_DEFINE2(newfstat, unsigned int, fd, struct stat __user *, statbuf)
+ 	struct kstat stat;
+ 	int error = vfs_fstat(fd, &stat);
+ 
++#ifdef CONFIG_KSU
++	if (unlikely(ksu_vfs_read_hook) && !error)
++		ksu_handle_vfs_fstat(fd, &stat.size);
++#endif
+ 	if (!error)
+ 		error = cp_new_stat(&stat, statbuf);
+ 
+-#ifdef CONFIG_KSU
+-	if (unlikely(ksu_init_rc_hook) && !error)
+-		ksu_handle_newfstat_ret(&fd, &statbuf);
+-#endif
+ 	return error;
+ }
+ #endif

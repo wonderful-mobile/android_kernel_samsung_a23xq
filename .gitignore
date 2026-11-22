@@ -22,3 +22,4 @@ drivers/kernelsu
 susfs4ksu*
 .wonderful/
 dist/
+!wonderful/patches/**/*.patch
