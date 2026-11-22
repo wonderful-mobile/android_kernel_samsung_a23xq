@@ -1,374 +1,352 @@
-#! /usr/bin/env bash
-
+#!/usr/bin/env bash
 #
-# Rissu Kernel Project
-# A special build script for Rissu's kernel
+# Wonderful Kernel build script.
 #
+#   ./build.sh                       # vanilla kernel
+#   ./build.sh --root ksun           # with KernelSU-Next
+#   ./build.sh --root sukisu --susfs # with SukiSU and SUSFS
+#
+# Run "./build.sh --help" for every option. New to this? Use ./run.sh, which
+# asks a few questions and calls this script for you.
+#
+# Root drivers and SUSFS are added only for the duration of the build: the
+# script applies them to the source tree, builds, and removes them again, so
+# the git tree stays clean.
 
-# << If unset
-[ -z $IS_CI ] && IS_CI=false
-[ -z $DO_CLEAN ] && DO_CLEAN=false
-[ -z $LTO ] && LTO=none
-[ -z $DEFAULT_KSU_REPO ] && DEFAULT_KSU_REPO="https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/legacy/kernel/setup.sh"
-# KernelSU-Next legacy, pinned to a reviewed commit. Override with KSU_REF=legacy for latest.
-[ -z $KSU_REF ] && KSU_REF="e5f5ec998"
-[ -z $SUSFS_KSU_REPO ] && SUSFS_KSU_REPO="https://raw.githubusercontent.com/rifsxd/KernelSU-Next/next/kernel/setup.sh"
-[ -z $DEVICE ] && DEVICE="Unknown"
+set -Eeuo pipefail
 
-# special rissu's path. linked to his toolchains
-if [ -d /rsuntk ]; then
-	export CROSS_COMPILE=/rsuntk/toolchains/aarch64-linux-android/bin/aarch64-linux-android-
-	export PATH=/rsuntk/toolchains/clang-20/bin:$PATH
+SRC="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+cd "$SRC"
+
+# shellcheck source=wonderful/device.conf
+. wonderful/device.conf
+
+# ---------------------------------------------------------------- settings --
+
+CLANG_NAME="clang-r416183b1" # Android clang 12.0.7, same as CI
+CLANG_URL="https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android12L-security-release/${CLANG_NAME}.tar.gz"
+TOOLCHAIN_DIR="${TOOLCHAIN_DIR:-$HOME/.cache/wonderful/toolchains}"
+
+AK3_REPO="https://github.com/osm0sis/AnyKernel3"
+AK3_REF="${AK3_REF:-41f04bdb4ee30a44e429c2c1131d5e8bb32b15f1}"
+
+# Root drivers, pinned to reviewed commits. Override with e.g. KSUN_REF=legacy.
+KSUN_REPO="https://github.com/KernelSU-Next/KernelSU-Next"
+KSUN_REF="${KSUN_REF:-e5f5ec998de88b9fc43c62cff8f7ae12d3f4800a}" # legacy branch
+SUKISU_REPO="https://github.com/SukiSU-Nova/SukiSU-Nova"
+SUKISU_REF="${SUKISU_REF:-4bec532dd447e2852aa8932afa768255350c103a}" # builtin, v3.0.0
+
+SUSFS_CONFIGS="KSU_SUSFS KSU_SUSFS_SUS_PATH KSU_SUSFS_SUS_MOUNT KSU_SUSFS_SUS_KSTAT
+KSU_SUSFS_SPOOF_UNAME KSU_SUSFS_ENABLE_LOG KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS
+KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG KSU_SUSFS_OPEN_REDIRECT KSU_SUSFS_SUS_MAP"
+
+OUT="$SRC/out"
+DIST="$SRC/dist"
+WORK="$SRC/.wonderful" # git-ignored cache for drivers and AnyKernel3
+
+ROOT="none"
+SUSFS=false
+LTO="${LTO:-none}"
+JOBS="$(nproc)"
+CLEAN=false
+PACKAGE=true
+CLEANUP_ONLY=false
+
+# ----------------------------------------------------------------- helpers --
+
+if [ -t 1 ]; then
+	C_INFO=$'\e[1;34m' C_OK=$'\e[1;32m' C_ERR=$'\e[1;31m' C_OFF=$'\e[0m'
+else
+	C_INFO="" C_OK="" C_ERR="" C_OFF=""
+fi
+info() { echo "${C_INFO}==>${C_OFF} $*"; }
+ok() { echo "${C_OK}==>${C_OFF} $*"; }
+die() { echo "${C_ERR}error:${C_OFF} $*" >&2; exit 1; }
+
+usage() {
+	cat <<EOF
+Wonderful Kernel build script for the $DEVICE_NAME ($DEVICE)
+
+Usage: ./build.sh [options]
+
+  -r, --root NAME     root manager built into the kernel:
+                        none    no root (default)
+                        ksun    KernelSU-Next
+                        sukisu  SukiSU
+  -s, --susfs         add SUSFS (only with: $SUSFS_SUPPORTED)
+  -j, --jobs N        parallel jobs (default: $(nproc))
+      --lto MODE      none, thin or full (default: none)
+      --clean         delete out/ before building
+      --no-zip        build the kernel only, skip the flashable zip
+      --cleanup       only remove a root driver left by an interrupted build
+  -h, --help          show this help
+
+The flashable zip is written to dist/.
+
+Environment overrides: KSUN_REF, SUKISU_REF, AK3_REF, TOOLCHAIN_DIR,
+KBUILD_BUILD_USER, KBUILD_BUILD_HOST.
+EOF
+}
+
+has_word() { [[ " $1 " == *" $2 "* ]]; }
+
+# --------------------------------------------------------------- arguments --
+
+while [ $# -gt 0 ]; do
+	case "$1" in
+	-r | --root) ROOT="${2:-}"; shift 2 ;;
+	--root=*) ROOT="${1#*=}"; shift ;;
+	-s | --susfs) SUSFS=true; shift ;;
+	-j | --jobs) JOBS="${2:-}"; shift 2 ;;
+	--lto) LTO="${2:-}"; shift 2 ;;
+	--clean) CLEAN=true; shift ;;
+	--no-zip) PACKAGE=false; shift ;;
+	--cleanup) CLEANUP_ONLY=true; shift ;;
+	-h | --help) usage; exit 0 ;;
+	*) usage; die "unknown option: $1" ;;
+	esac
+done
+
+has_word "$ROOT_SUPPORTED" "$ROOT" || die "unknown root manager '$ROOT' (choose: $ROOT_SUPPORTED)"
+if $SUSFS && ! has_word "$SUSFS_SUPPORTED" "$ROOT"; then
+	die "SUSFS needs one of these root managers: $SUSFS_SUPPORTED"
+fi
+[[ "$JOBS" =~ ^[0-9]+$ ]] || die "--jobs needs a number"
+has_word "none thin full" "$LTO" || die "--lto must be none, thin or full"
+
+case "$ROOT" in
+none) VARIANT="Vanilla" ;;
+ksun) VARIANT="KernelSU-Next" ;;
+sukisu) VARIANT="SukiSU" ;;
+esac
+$SUSFS && VARIANT="$VARIANT-SUSFS"
+
+# ------------------------------------------------------------- environment --
+
+# On NixOS, re-run inside the FHS environment from shell.nix so Android's
+# prebuilt clang works.
+if ! $CLEANUP_ONLY && [ -z "${WONDERFUL_FHS:-}" ] && [ -e /etc/NIXOS ]; then
+	if [ -n "${WONDERFUL_FHS_CMD:-}" ]; then
+		exec "$WONDERFUL_FHS_CMD" -c "$(printf '%q ' "$SRC/build.sh" "$@" \
+			--root "$ROOT" $($SUSFS && echo --susfs) --jobs "$JOBS" --lto "$LTO" \
+			$($CLEAN && echo --clean) $($PACKAGE || echo --no-zip))"
+	fi
+	die "on NixOS, run this from the Nix shell: nix-shell --run './build.sh ...'"
 fi
 
-# start of default args
-DEFAULT_ARGS="
-CONFIG_SECTION_MISMATCH_WARN_ONLY=y
-ARCH=arm64
-KCFLAGS=-w
-CONFIG_BUILD_ARM64_DT_OVERLAY=y
-CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE_O3=y
-"
+$CLEANUP_ONLY || for tool in bc bison flex make perl python3 git curl zip cpio; do
+	command -v "$tool" >/dev/null || die "missing '$tool'. Install the build dependencies (see README) or use nix-shell."
+done
+
+fetch_toolchain() {
+	local dir="$TOOLCHAIN_DIR/$CLANG_NAME"
+	if [ ! -x "$dir/bin/clang" ]; then
+		info "Downloading Android clang ($CLANG_NAME, about 1.4 GB once)"
+		mkdir -p "$dir.tmp"
+		curl -fL --retry 3 "$CLANG_URL" | tar -xz -C "$dir.tmp"
+		rm -rf "$dir" && mv "$dir.tmp" "$dir"
+	fi
+	export PATH="$dir/bin:$PATH"
+}
+
+# Clone (or update) a git repo into the cache and check out a pinned ref.
+# A full (blobless) clone is used because the root drivers compute their
+# version number from the commit count.
+fetch_repo() { # fetch_repo <url> <ref> <dir>
+	local url="$1" ref="$2" dir="$3"
+	if [ ! -d "$dir/.git" ]; then
+		git clone --quiet --filter=blob:none "$url" "$dir"
+	fi
+	# Drop fixes applied by an earlier build (see patches/driver/).
+	git -C "$dir" reset --quiet --hard
+	git -C "$dir" clean --quiet -fd
+	if ! git -C "$dir" checkout --quiet --detach "$ref" 2>/dev/null; then
+		git -C "$dir" fetch --quiet --tags origin
+		git -C "$dir" checkout --quiet --detach "$ref" ||
+			git -C "$dir" checkout --quiet --detach "origin/$ref"
+	fi
+}
+
+# ------------------------------------------------- temporary tree changes --
+
+APPLIED_PATCHES=()
+DRIVER_LINKED=false
+
+restore_tree() {
+	local i
+	for ((i = ${#APPLIED_PATCHES[@]} - 1; i >= 0; i--)); do
+		git apply -R "${APPLIED_PATCHES[i]}" || echo "warning: could not revert ${APPLIED_PATCHES[i]}" >&2
+	done
+	APPLIED_PATCHES=()
+	if $DRIVER_LINKED || [ -L drivers/kernelsu ]; then
+		rm -f drivers/kernelsu
+		sed -i '/^obj-\$(CONFIG_KSU) += kernelsu\/$/d' drivers/Makefile
+		sed -i '/^source "drivers\/kernelsu\/Kconfig"$/d' drivers/Kconfig
+		DRIVER_LINKED=false
+	fi
+}
+trap restore_tree EXIT
+# Ctrl+C or a kill should clean up too.
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+
+apply_patch_dir() { # apply_patch_dir <dir>
+	local p
+	[ -d "$1" ] || return 0
+	for p in "$1"/*.patch; do
+		[ -e "$p" ] || continue
+		info "Applying ${p#"$SRC"/}"
+		git apply --check "$p" 2>/dev/null ||
+			die "${p#"$SRC"/} does not apply cleanly. See the failed files with: git apply --check -v ${p#"$SRC"/}"
+		git apply "$p"
+		APPLIED_PATCHES+=("$p")
+	done
+}
+
+setup_root() {
+	local url ref
+	case "$ROOT" in
+	none) return 0 ;;
+	ksun) url="$KSUN_REPO" ref="$KSUN_REF" ;;
+	sukisu) url="$SUKISU_REPO" ref="$SUKISU_REF" ;;
+	esac
+
+	info "Fetching $VARIANT driver ($ROOT @ ${ref:0:12})"
+	fetch_repo "$url" "$ref" "$WORK/root/$ROOT"
+
+	# Small fixes to the driver itself, e.g. for building on older kernels.
+	local p
+	for p in "$SRC/wonderful/patches/driver/$ROOT"/*.patch; do
+		[ -e "$p" ] || continue
+		info "Applying ${p#"$SRC"/} to the driver"
+		git -C "$WORK/root/$ROOT" apply "$p" || die "${p#"$SRC"/} does not apply to $ROOT @ ${ref:0:12}"
+	done
+
+	ln -sfn "../.wonderful/root/$ROOT/kernel" drivers/kernelsu
+	printf 'obj-$(CONFIG_KSU) += kernelsu/\n' >>drivers/Makefile
+	printf 'source "drivers/kernelsu/Kconfig"\n' >>drivers/Kconfig
+	DRIVER_LINKED=true
+
+	local kver
+	kver="$(make -s kernelversion | cut -d. -f1-2)"
+	if $SUSFS; then
+		apply_patch_dir "$SRC/wonderful/patches/susfs/$kver"
+		apply_patch_dir "$SRC/wonderful/patches/root/$ROOT-susfs"
+	else
+		apply_patch_dir "$SRC/wonderful/patches/root/$ROOT"
+	fi
+}
+
+# ------------------------------------------------------------------- build --
+
+MAKE_ARGS=(
+	-C "$SRC" O="$OUT" ARCH=arm64
+	LLVM=1 LLVM_IAS=1
+	CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+	CLANG_TRIPLE=aarch64-linux-gnu-
+	KCFLAGS=-w CONFIG_SECTION_MISMATCH_WARN_ONLY=y CONFIG_BUILD_ARM64_DT_OVERLAY=y
+	LOCALVERSION="-wonderful-$PROJECT_VERSION-$VARIANT"
+)
+# Inside the Nix FHS shell, host tools are built with gcc (Android clang
+# cannot find the host C runtime there). The kernel itself still uses clang.
+[ -n "${WONDERFUL_FHS:-}" ] && MAKE_ARGS+=(HOSTCC=gcc HOSTCXX=g++)
+
+kconfig() { "$SRC/scripts/config" --file "$OUT/.config" "$@"; }
+
+configure() {
+	info "Configuring ($DEFCONFIG)"
+	make "${MAKE_ARGS[@]}" "$DEFCONFIG" >/dev/null
+
+	case "$ROOT" in
+	none) ;;
+	ksun) kconfig --enable KSU --enable KSU_MANUAL_HOOK ;;
+	sukisu) kconfig --enable KSU --disable KPM ;;
+	esac
+
+	local c
+	if [ "$ROOT" = sukisu ]; then
+		if $SUSFS; then
+			for c in $SUSFS_CONFIGS; do kconfig --enable "$c"; done
+		else
+			kconfig --disable KSU_SUSFS
+		fi
+	fi
+
+	case "$LTO" in
+	thin) kconfig --disable LTO_NONE --enable LTO_CLANG --enable THINLTO ;;
+	full) kconfig --disable LTO_NONE --enable LTO_CLANG --disable THINLTO ;;
+	esac
+
+	make "${MAKE_ARGS[@]}" olddefconfig >/dev/null
+
+	# Fail early if a requested option did not survive olddefconfig.
+	if [ "$ROOT" != none ]; then
+		grep -q '^CONFIG_KSU=y' "$OUT/.config" || die "CONFIG_KSU could not be enabled"
+	fi
+	if $SUSFS; then
+		grep -q '^CONFIG_KSU_SUSFS=y' "$OUT/.config" || die "CONFIG_KSU_SUSFS could not be enabled"
+	fi
+}
+
+package() {
+	local ak3="$WORK/AnyKernel3" stage="$OUT/ak3" sha release name
+	info "Packing flashable zip"
+	fetch_repo "$AK3_REPO" "$AK3_REF" "$ak3"
+
+	rm -rf "$stage" && mkdir -p "$stage" "$DIST"
+	cp -r "$ak3"/tools "$ak3"/META-INF "$stage"/
+	cp "$ak3"/LICENSE "$stage"/ 2>/dev/null || true
+	cp wonderful/anykernel.sh "$stage"/anykernel.sh
+	cp "$OUT/arch/arm64/boot/Image" "$stage"/
+
+	release="$(cat "$OUT/include/config/kernel.release")"
+	sed -i "s|^kernel.string=.*|kernel.string=Wonderful Kernel $PROJECT_VERSION ($VARIANT) $release|" "$stage"/anykernel.sh
+
+	sha="$(git rev-parse --short HEAD 2>/dev/null || echo local)"
+	name="Wonderful-$PROJECT_VERSION-$DEVICE-$VARIANT-$sha.zip"
+	rm -f "$DIST/$name"
+	(cd "$stage" && zip -qr9 "$DIST/$name" .)
+
+	cat >"$DIST/${name%.zip}.txt" <<EOF
+Wonderful Kernel $PROJECT_VERSION for $DEVICE_NAME ($DEVICE)
+Variant:  $VARIANT
+Kernel:   $release
+Source:   $sha
+Root:     $ROOT $(case $ROOT in ksun) echo "@ $KSUN_REF" ;; sukisu) echo "@ $SUKISU_REF" ;; esac)
+SUSFS:    $SUSFS
+Built:    $(date -u +'%Y-%m-%d %H:%M UTC')
+EOF
+	ok "Flashable zip: dist/$name"
+}
+
+# -------------------------------------------------------------------- main --
 
 export ARCH=arm64
-export CLANG_TRIPLE=aarch64-linux-gnu-
-export DTC_EXT=$(pwd)/tools/dtc
-export PROJECT_NAME="Wonderful-${PROJECT_VERSION}-${DEVICE}"
-export CLANG_VERSION_TEXT=$(clang --version | head -n 1)
-if [ "$SUSFS4KSU" = "true" ]; then
-    export LOCALVERSION="-wonderful-${PROJECT_VERSION}-SuSFS-qgki+"
-elif [ "$KERNELSU" = "true" ]; then
-    export LOCALVERSION="-wonderful-${PROJECT_VERSION}-Next-qgki+"
-else
-    export LOCALVERSION="-wonderful-${PROJECT_VERSION}-Vanilla-gki+"
+export KBUILD_BUILD_USER="${KBUILD_BUILD_USER:-$(whoami)}"
+export KBUILD_BUILD_HOST="${KBUILD_BUILD_HOST:-wonderful}"
+
+if [ -L drivers/kernelsu ] || grep -q 'kernelsu' drivers/Makefile; then
+	info "Removing a root driver left over from an earlier, interrupted build"
+	restore_tree
 fi
-# end of default args
-
-strip() { # fmt: strip <module>
-	llvm-strip $@ --strip-unneeded
-}
-setconfig() { # fmt: setconfig enable/disable <NAME>
-	[ -e $(pwd)/.config ] && config_file="$(pwd)/.config" || config_file="$(pwd)/out/.config"
-	if [ -d $(pwd)/scripts ]; then
-		./scripts/config --file `echo $config_file` --`echo $1` CONFIG_`echo $2`
-	else
-		echo "! Folder scripts not found!"
-		exit
-	fi
-}
-clone_ak3() {
-	[ ! -d $(pwd)/AnyKernel3 ] && git clone https://github.com/rsuntk/AnyKernel3.git --depth=1
-	rm -rf AnyKernel3/.git
-}
-gen_getutsrelease() {
-# generate simple c file
-if [ ! -e utsrelease.c ]; then
-echo "/* Generated file by `basename $0` */
-#include <stdio.h>
-#ifdef __OUT__
-#include \"out/include/generated/utsrelease.h\"
-#else
-#include \"include/generated/utsrelease.h\"
-#endif
-
-char utsrelease[] = UTS_RELEASE;
-
-int main() {
-	printf(\"%s\n\", utsrelease);
-	return 0;
-}" > utsrelease.c
-fi
-}
-pr_invalid() {
-	echo -e "[-] Invalid args: $@"
-	exit
-}
-pr_err() {
-	echo -e "[-] $@"
-	exit
-}
-pr_info() {
-	echo -e "[+] $@"
-}
-usage() {
-	echo -e "Usage:  `basename $0` <build_target> <-j | --jobs> <(job_count)> <defconfig>"
-	printf "\tbuild_target: dirty, kernel, config, clean\n"
-	printf "\t-j or --jobs: <int>\n"
-	
-	[ -d arch/$ARCH/configs ] && printf "\tavailable defconfig: `ls arch/arm64/configs`\n"
-	
-	echo ""
-	printf "NOTE: Run: \texport CROSS_COMPILE=\"<PATH_TO_ANDROID_CC>\"\n"
-	printf "\t\texport PATH=\"<PATH_TO_LLVM>\"\n"
-	printf "before running this script!\n"
-	printf "\n"
-	printf "Misc:\n"
-	printf "\tPOST_BUILD_CLEAN: Clean post build: (opt:boolean)\n"
-	printf "\tLTO: Use Link-time Optimization; options: (opt: none, thin, full)\n"
-	printf "\tLLVM: Use all llvm toolchains to build: (opt: 1)\n"
-	printf "\tLLVM_IAS: Use llvm integrated assembler: (opt: 1)\n"
-	exit;
-}
-
-# if first arg starts with "clean"
-if [[ "$1" = "clean" ]]; then
-	[ $# -gt 1 ] && pr_err "Excess argument, only need one argument."
-	pr_info "Cleaning dirs"
-	if [ -d $(pwd)/out ]; then
-		rm -rf out
-	elif [ -f $(pwd)/.config ]; then
-		make clean
-		make mrproper
-	else
-		pr_err "No need clean."
-	fi
-	pr_err "All clean."
-elif [[ "$1" = "dirty" ]]; then
-	if [ $# -gt 3 ]; then
-		pr_err "Excess argument, only need three argument."
-	fi	
-	pr_err "Starting dirty build"
-	FIRST_JOB="$2"
-	JOB_COUNT="$3"
-	if [ "$FIRST_JOB" = "-j" ] || [ "$FIRST_JOB" = "--jobs" ]; then
-		if [ ! -z $JOB_COUNT ]; then
-			ALLOC_JOB=$JOB_COUNT
-		else
-			pr_invalid $3
-		fi
-	else
-		pr_invalid $2
-	fi
-	make -j`echo $ALLOC_JOB` -C $(pwd) O=$(pwd)/out `echo $DEFAULT_ARGS` 
-elif [[ "$1" = "ak3" ]]; then
-	if [ $# -gt 1 ]; then
-		pr_err "Excess argument, only need one argument."
-	fi
-	clone_ak3;
-else
-	[ $# != 4 ] && usage;
+if $CLEANUP_ONLY; then
+	ok "Source tree is clean"
+	exit 0
 fi
 
+info "Wonderful Kernel $PROJECT_VERSION for $DEVICE_NAME: $VARIANT"
+$CLEAN && { info "Cleaning out/"; rm -rf "$OUT"; }
 
-if [ "$SUSFS4KSU" = "true" ]; then
-	curl -LSs $DEFAULT_KSU_REPO | bash -s legacy_susfs
-else
-    [ "$KERNELSU" = "true" ] && curl -LSs $DEFAULT_KSU_REPO | bash -s $KSU_REF || pr_info "KernelSU Next is disabled. Add 'KERNELSU=true' or 'export KERNELSU=true' to enable"
-fi
+fetch_toolchain
+setup_root
+configure
 
-BUILD_TARGET="$1"
-FIRST_JOB="$2"
-JOB_COUNT="$3"
-DEFCONFIG="$4"
+info "Building with $JOBS jobs (clang $(clang --version | head -1 | grep -o 'clang version [0-9.]*' | cut -d' ' -f3))"
+start=$SECONDS
+make "${MAKE_ARGS[@]}" -j"$JOBS"
+[ -f "$OUT/arch/arm64/boot/Image" ] || die "build finished but out/arch/arm64/boot/Image is missing"
+ok "Kernel built in $(((SECONDS - start) / 60))m $(((SECONDS - start) % 60))s: $(strings "$OUT/arch/arm64/boot/Image" | grep -m1 'Linux version' | cut -d' ' -f1-3)"
 
-if [ "$BUILD_TARGET" = "kernel" ]; then
-	BUILD="kernel"
-elif [ "$BUILD_TARGET" = "defconfig" ]; then
-	BUILD="defconfig"
-else
-	pr_invalid $1
-fi
-
-if [ "$FIRST_JOB" = "-j" ] || [ "$FIRST_JOB" = "--jobs" ]; then
-	if [ ! -z $JOB_COUNT ]; then
-		ALLOC_JOB=$JOB_COUNT
-	else
-		pr_invalid $3
-	fi
-else
-	pr_invalid $2
-fi
-
-if [ ! -z "$DEFCONFIG" ]; then
-	BUILD_DEFCONFIG="$DEFCONFIG"
-else
-	pr_invalid $4
-fi
-
-IMAGE="$(pwd)/out/arch/arm64/boot/Image"
-
-if [ "$LLVM" = "1" ]; then
-	LLVM_="true"
-	DEFAULT_ARGS+=" LLVM=1"
-	export LLVM=1
-	if [ "$LLVM_IAS" = "1" ]; then
-		LLVM_IAS_="true"
-		DEFAULT_ARGS+=" LLVM_IAS=1"
-		export LLVM_IAS=1
-	fi
-else
-	LLVM_="false"
-	if [ "$LLVM_IAS" != "1" ]; then
-		LLVM_IAS_="false"
-	fi
-fi
-
-pr_sum() {
-	[ -z $KBUILD_BUILD_USER ] && KBUILD_BUILD_USER="`whoami`"
-	[ -z $KBUILD_BUILD_HOST ] && KBUILD_BUILD_HOST="`hostname`"
-	
-	echo ""
-	echo -e "Host Arch: `uname -m`"
-	echo -e "Host Kernel: `uname -r`"
-	echo -e "Host gnumake: `make -v | grep -e "GNU Make"`"
-	echo ""
-	echo -e "Linux version: `make kernelversion`"
-	echo -e "Kernel builder user: $KBUILD_BUILD_USER"
-	echo -e "Kernel builder host: $KBUILD_BUILD_HOST"
-	echo -e "Build date: `date`"
-	echo -e "Build target: `echo $BUILD`"
-	echo -e "Arch: $ARCH"
-	echo -e "Defconfig: $BUILD_DEFCONFIG"
-	echo -e "Allocated core: $ALLOC_JOB"
-	echo ""
-	echo -e "LLVM: $LLVM_"
-	echo -e "LLVM_IAS: $LLVM_IAS_"
-	echo ""
-	echo -e "LTO: $LTO"
-	echo ""
-}
-
-pr_post_build() {
-	echo ""
-	echo -e "## Build $@ at `date` ##"
-	echo ""
-	[ "$@" = "failed" ] && exit
-}
-
-post_build_clean() {
-	if [ -e $AK3 ]; then
-		rm -rf $AK3/Image
-		rm -rf $AK3/modules/vendor/lib/modules/*.ko
-		sed -i "s/do\.modules=.*/do.modules=0/" "$(pwd)/AnyKernel3/anykernel.sh"
-		echo "stub" > $AK3/modules/vendor/lib/modules/stub
-	fi
-	rm getutsrel
-	rm utsrelease.c
-	# clean out folder
-	rm -rf out
-	make clean
-	make mrproper
-}
-
-post_build() {
-	if [ -d $(pwd)/.git ]; then
-		GITSHA=$(git rev-parse --short HEAD)
-	else
-		GITSHA="localbuild"
-	fi
-	
-	AK3="$(pwd)/AnyKernel3"
-	DATE=$(date +'%Y%m%d%H%M%S')
-	if [ "$SUSFS4KSU" = "true" ]; then
-		MOD="-SuSFS"
-	elif [ "$KERNELSU" = "true" ]; then
-		MOD="-Next"
-	else
-		MOD="-Vanilla"
-	fi
-	
-	ZIP_FMT="Anykernel3-${PROJECT_NAME}-${GITSHA}-${DATE}${MOD}"
-	
-	clone_ak3;
-	if [ -d $AK3 ]; then
-		echo "- Creating AnyKernel3"
-		gen_getutsrelease;
-		if [ -d $(pwd)/out ]; then
-			gcc -D__OUT__ -CC utsrelease.c -o getutsrel
-		else
-			gcc -CC utsrelease.c -o getutsrel
-		fi
-		UTSRELEASE=$(./getutsrel)
-		sed -i "s/kernel\.string=.*/kernel.string=$UTSRELEASE/" "$AK3/anykernel.sh"
-		sed -i "s/BLOCK=.*/BLOCK=\/dev\/block\/bootdevice\/by-name\/boot;/" "$AK3/anykernel.sh"
-		cp $IMAGE $AK3
-		cd $AK3
-		zip -r9 ../`echo $ZIP_FMT`.zip *
-		# CI will clean itself post-build, so we don't need to clean
-		# Also avoiding small AnyKernel3 zip issue!
-		if [ "$IS_CI" != "true" ] && [ "$DO_CLEAN" = "true" ]; then
-			pr_info "Host is not Automated CI, cleaning dirs"
-			post_build_clean;
-		fi
-		cd ..
-		pr_err "Build done. Thanks for using this build script :)"
-	fi
-
-	# LKM strip start!
-	mkdir ../kernel_obj_tmp && mkdir kernel_obj
-        find $(pwd) -type f -name "*.ko" -exec mv {} ../kernel_obj_tmp \;
-	TMP_MODLIST=$(find ../kernel_obj_tmp -type f -name "*.ko")
-	
-        # Start stripping
-        for file in $TMP_MODLIST; do
-          pr_info "Stripping `basename $file`"
-          strip "$file"
-        done
-        mv ../kernel_obj_tmp/*.ko $(pwd)/kernel_obj/
-        
-        LKM_FMT="LKM-`echo $DEVICE`_$GITSHA-$DATE"
-	tar -czf `echo $LKM_FMT`.tar.gz kernel_obj/*
-	rm -rf kernel_obj ../kernel_obj_tmp
-}
-
-handle_lto() {
-	if [[ "$LTO" = "thin" ]]; then
-		pr_info "LTO: Thin"
-		setconfig disable LTO_NONE
-		setconfig enable LTO
-		setconfig enable THINLTO
-		setconfig enable LTO_CLANG
-		setconfig enable ARCH_SUPPORTS_LTO_CLANG
-		setconfig enable ARCH_SUPPORTS_THINLTO
-	elif [[ "$LTO" = "full" ]]; then
-		pr_info "LTO: Full"
-		setconfig disable LTO_NONE
-		setconfig enable LTO
-		setconfig disable THINLTO
-		setconfig enable LTO_CLANG
-		setconfig enable ARCH_SUPPORTS_LTO_CLANG
-		setconfig enable ARCH_SUPPORTS_THINLTO
-	fi
-}
-# call summary
-pr_sum
-if [ "$BUILD" = "kernel" ]; then
-    echo "Building kernel"
-
-    # Initial defconfig build
-    make -j`echo $ALLOC_JOB` -C $(pwd) O=$(pwd)/out `echo $DEFAULT_ARGS` `echo $BUILD_DEFCONFIG`
-    
-    # Apply SuSFS-specific configurations before final build
-    if [ "$SUSFS4KSU" = "true" ]; then
-        echo "SuSFS enabled"
-        setconfig enable KSU
-		setconfig enable KSU_SUSFS
-		setconfig enable KSU_SUSFS_SUS_PATH
-		setconfig enable KSU_SUSFS_SUS_MOUNT
-		setconfig enable KSU_SUSFS_SUS_KSTAT
-		setconfig enable KSU_SUSFS_SPOOF_UNAME
-		setconfig enable KSU_SUSFS_ENABLE_LOG
-		setconfig enable KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS
-		setconfig enable KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
-		setconfig enable KSU_SUSFS_OPEN_REDIRECT
-		setconfig enable KSU_SUSFS_SUS_MAP
-		setconfig enable THREAD_INFO_IN_TASK
-		setconfig enable KSU_TAMPER_SYSCALL_TABLE
-    else
-        [ "$KERNELSU" = "true" ] && echo "KernelSU Enabled" && setconfig enable KSU && setconfig enable KSU_MANUAL_HOOK
-    fi
-
-    # Apply LTO configuration if enabled
-    [ "$LTO" != "none" ] && handle_lto || pr_info "LTO not set"
-
-    # Final kernel build
-    make -j`echo $ALLOC_JOB` -C $(pwd) O=$(pwd)/out `echo $DEFAULT_ARGS`
-
-    # Check for successful build
-    if [ -e $IMAGE ]; then
-        pr_post_build "completed"
-        post_build
-    else
-        pr_post_build "failed"
-    fi
-fi
+$PACKAGE && package
+exit 0

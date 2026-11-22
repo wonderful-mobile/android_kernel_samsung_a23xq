@@ -20,3 +20,5 @@ drivers/kernelsu
 *.orig
 *.patch
 susfs4ksu*
+.wonderful/
+dist/

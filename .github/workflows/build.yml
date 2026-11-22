@@ -1,114 +1,80 @@
-name: Build wonderful kernel
+name: Build Wonderful Kernel
+
+# Manual runs build every variant from the chosen branch and upload them as
+# workflow artifacts. Pushing a tag like v0.8 also publishes a GitHub release
+# with fixed file names, which the install guide on the website links to:
+#   Wonderful-<device>-<variant>.zip
 
 on:
   workflow_dispatch:
-    inputs:
-      BRANCH:
-        description: Kernel branch
-        default: 'wonderful-fourteen'
-        required: true
-      DEFCONFIG:
-        description: Defconfig
-        default: 'wonderful_defconfig'
-        required: true
+  push:
+    tags: ["v*"]
 
 jobs:
   build:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        variant: ["Vanilla", "KernelSU Next"] # Primitive values only
+        include:
+          - variant: Vanilla
+            args: ""
+          - variant: KernelSU-Next
+            args: "--root ksun"
+          - variant: SukiSU
+            args: "--root sukisu"
+          - variant: SukiSU-SUSFS
+            args: "--root sukisu --susfs"
 
     steps:
-    - uses: actions/checkout@v4
-      with:
-        repository: wonderful-mobile/android_kernel_samsung_a23xq
-        path: kernel_root
-        ref: ${{ github.event.inputs.BRANCH }}
-        show-progress: false
-        fetch-depth: 1
+      - uses: actions/checkout@v4
 
-    - name: Prepare dependencies
-      run: |
-        sudo apt update -y
-        sudo apt install bc cpio flex bison aptitude git python-is-python3 tar perl wget curl lz4 -y
-        sudo aptitude install libssl-dev -y
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y bc bison flex cpio lz4 zip libssl-dev libelf-dev
 
-    - name: Fetch toolchains
-      run: |
-        mkdir toolchain
-        cd toolchain
-        git clone --depth=1 https://github.com/rsuntk/toolchains.git -b androidcc-4.9 google
-        mkdir clang-12.0.7
-        cd clang-12.0.7
-        wget https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android12L-security-release/clang-r416183b1.tar.gz
-        tar -xvf *
-      working-directory: kernel_root
+      - name: Cache Android clang
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/wonderful/toolchains
+          key: toolchain-clang-r416183b1
 
-    - name: Prepare timezone fix
-      run: |
-        sudo rm /etc/localtime
-        sudo ln -s /usr/share/zoneinfo/Asia/Bangkok /etc/localtime
+      - name: Build ${{ matrix.variant }}
+        env:
+          KBUILD_BUILD_USER: wonderful
+          KBUILD_BUILD_HOST: github-actions
+        run: ./build.sh ${{ matrix.args }}
 
-    - name: Build kernel - ${{ matrix.variant }}
-      id: buildKernel
-      run: |
-        CLANG_VERSION=12.0.7 && echo "CLANG_VERSION=$CLANG_VERSION" >> $GITHUB_ENV
-        export CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE_O3=y
-        export PATH=$(pwd)/toolchain/clang-`echo $CLANG_VERSION`/bin:$PATH
-        export CROSS_COMPILE=$(pwd)/toolchain/google/bin/aarch64-linux-android-
-        export CLANG_TRIPLE=aarch64-linux-gnu-
-        export KBUILD_BUILD_USER="Runner"
-        export KBUILD_BUILD_HOST="GitHubActions"
-        export BUILD_START=`date`
-        export IS_CI=true
-        export DEFCONFIG="wonderful_defconfig"
-        export DEVICE="a23xq"
-        export DEVICE_ID="A23 5G"
-        export PROJECT_VERSION="0.8"
-        export LLVM=1
-        export LLVM_IAS=1
-        
-        # Conditional logic for environment variables
-        if [[ "${{ matrix.variant }}" == "KernelSU Next" ]]; then
-          export KERNELSU=true
-          export SUSFS4KSU=false
-          ZIP_SUFFIX="-NEXT"
-        elif [[ "${{ matrix.variant }}" == "KernelSU Next + SUSFS" ]]; then
-          export KERNELSU=true
-          export SUSFS4KSU=true
-          ZIP_SUFFIX="-SuSFS"
-        else
-          export KERNELSU=false
-          export SUSFS4KSU=false
-          ZIP_SUFFIX="-Vanilla"
-        fi
-        DATE=$(date +'%Y%m%d%H%M%S')
-        GITSHA=$(git rev-parse --short HEAD)
-        PROJECT_NAME="Wonderful-${PROJECT_VERSION}-${DEVICE}"
+      - name: Name release file
+        run: |
+          . wonderful/device.conf
+          mkdir release
+          cp dist/*.zip "release/Wonderful-${DEVICE}-${{ matrix.variant }}.zip"
+          cp dist/*.txt "release/Wonderful-${DEVICE}-${{ matrix.variant }}.txt"
+          cp out/.config "release/Wonderful-${DEVICE}-${{ matrix.variant }}.config"
 
-        bash $(pwd)/build.sh kernel --jobs $(nproc --all) `echo $DEFCONFIG`
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Wonderful-${{ matrix.variant }}
+          path: release/*
 
-        echo ""
-        echo "===================================================="
-        strings out/arch/arm64/boot/Image | grep "Linux version"
-        echo "===================================================="
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release
+          merge-multiple: true
 
-        mv out/.config out/build_config.txt
-        gitsha1=$(git rev-parse --short HEAD)
-        buildDetails="`make kernelversion`-`echo $DEVICE`_`echo $gitsha1`-`date +'%Y%m%d%H%M%S'`$ZIP_SUFFIX" && echo "buildDetails=$buildDetails" >> $GITHUB_ENV
-        ZIP_FMT="${PROJECT_NAME}-${GITSHA}-${DATE}${ZIP_SUFFIX}" && echo "ZIP_FMT=$ZIP_FMT" >> $GITHUB_ENV
-      working-directory: kernel_root
-
-    - name: Upload config
-      uses: actions/upload-artifact@v4
-      with:
-        name: Config-${{ env.ZIP_FMT }}
-        path: kernel_root/out/build_config.txt
-
-    - name: Upload AnyKernel3
-      uses: actions/upload-artifact@v4
-      with:
-        name: AnyKernel3-${{ env.ZIP_FMT }}
-        path: kernel_root/AnyKernel3/*
-        compression-level: 9
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: Wonderful Kernel ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            release/*.zip
+            release/*.txt

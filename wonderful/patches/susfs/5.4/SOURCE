@@ -1,0 +1,6 @@
+Ported from: https://github.com/JackA1ltman/NonGKI_Kernel_Build_2nd (mainline)
+             Patches/Patch/susfs_patch_to_5.4.patch (SUSFS v2.4.0)
+Base:        wonderful-kernel-a23xq Nov2026-Update-experiment (078b65a88)
+Local fixes: 9 rejected hunks resolved for Samsung context
+             fs/proc/task_mmu.c: show_smap() "return;" -> "return 0;"
+             fs/stat.c: add missing #include <linux/susfs_def.h>

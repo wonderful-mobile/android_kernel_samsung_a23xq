@@ -1,29 +1,75 @@
-#! /usr/bin/env bash
-CLANG_VERSION=12.0.7 && echo "CLANG_VERSION=$CLANG_VERSION"
-export CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE_O3=y
-export PATH=$(pwd)/toolchain/clang-`echo $CLANG_VERSION`/bin:$PATH
-export CROSS_COMPILE=$(pwd)/toolchain/google/bin/aarch64-linux-android-
-export CLANG_TRIPLE=aarch64-linux-gnu-
-export KBUILD_BUILD_USER="mindthenerd"
-export KBUILD_BUILD_HOST="wonderful-mobile"
-export BUILD_START=`date`
-export IS_CI=false
-export DEFCONFIG="wonderful_defconfig"
-export DEVICE="a23xq"
-export DEVICE_ID="A23 5G"
-export PROJECT_VERSION="0.8"
-export LLVM=1
-export LLVM_IAS=1
-export KERNELSU=true
-export SUSFS4KSU=true
-        
-bash $(pwd)/build.sh kernel --jobs $(nproc --all) `echo $DEFCONFIG`
-        
-echo ""
-echo "===================================================="
-strings out/arch/arm64/boot/Image | grep "Linux version"
-echo "===================================================="
+#!/usr/bin/env bash
+#
+# Friendly front end for build.sh: asks which kernel you want, then builds it.
+#
+#   ./run.sh                    # ask questions
+#   ./run.sh --root ksun ...    # skip the questions, same options as build.sh
+#
+# On NixOS (or anywhere Nix is installed) it uses shell.nix automatically.
 
-mv out/.config out/build_config.txt
-gitsha1=$(git rev-parse --short HEAD)
-buildDetails="`make kernelversion`-`echo $DEVICE`_`echo $gitsha1`-`date +'%Y%m%d%H%M%S'`" && echo "buildDetails=$buildDetails"
+set -Eeuo pipefail
+SRC="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+cd "$SRC"
+. wonderful/device.conf
+
+run_build() {
+	# Use the Nix shell when Nix is available and we are not inside it yet.
+	if [ -z "${WONDERFUL_FHS_CMD:-}" ] && [ -z "${WONDERFUL_FHS:-}" ] && command -v nix-shell >/dev/null; then
+		exec nix-shell "$SRC/shell.nix" --run "$(printf '%q ' "$SRC/build.sh" "$@")"
+	fi
+	exec "$SRC/build.sh" "$@"
+}
+
+# Options given: behave exactly like build.sh.
+[ $# -gt 0 ] && run_build "$@"
+
+ask() { # ask <prompt> <default> -> REPLY
+	local prompt="$1" def="$2"
+	read -r -p "$prompt [$def]: " REPLY || true
+	REPLY="${REPLY:-$def}"
+}
+
+cat <<EOF
+
+  Wonderful Kernel for the $DEVICE_NAME ($DEVICE)
+  -------------------------------------------------
+
+  Which root manager do you want built into the kernel?
+
+    1) None              plain kernel, no root
+    2) KernelSU-Next     recommended for most people
+    3) SukiSU            KernelSU fork, also supports SUSFS
+
+EOF
+ask "Choose 1-3" 2
+case "$REPLY" in
+1) ROOT=none ;;
+2) ROOT=ksun ;;
+3) ROOT=sukisu ;;
+*) echo "Please choose 1, 2 or 3." >&2; exit 1 ;;
+esac
+
+SUSFS=false
+if [[ " $SUSFS_SUPPORTED " == *" $ROOT "* ]]; then
+	echo
+	echo "  SUSFS hides root from apps that refuse to run on rooted phones."
+	echo "  It is optional and adds some complexity. Skip it if you are not sure."
+	echo
+	ask "Add SUSFS? (y/n)" n
+	[[ "$REPLY" =~ ^[Yy] ]] && SUSFS=true
+fi
+
+echo
+ask "Start from a clean build? Slower, but safer after updates (y/n)" n
+CLEAN=false
+[[ "$REPLY" =~ ^[Yy] ]] && CLEAN=true
+
+ARGS=(--root "$ROOT")
+$SUSFS && ARGS+=(--susfs)
+$CLEAN && ARGS+=(--clean)
+
+echo
+echo "  Running: ./build.sh ${ARGS[*]}"
+echo "  The first build downloads the compiler (about 1.4 GB) and takes a while."
+echo
+run_build "${ARGS[@]}"
