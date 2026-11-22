@@ -9,7 +9,9 @@
 [ -z $IS_CI ] && IS_CI=false
 [ -z $DO_CLEAN ] && DO_CLEAN=false
 [ -z $LTO ] && LTO=none
-[ -z $DEFAULT_KSU_REPO ] && DEFAULT_KSU_REPO="https://raw.githubusercontent.com/rifsxd/KernelSU-Next/next/kernel/setup.sh"
+[ -z $DEFAULT_KSU_REPO ] && DEFAULT_KSU_REPO="https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/legacy/kernel/setup.sh"
+# KernelSU-Next legacy, pinned to a reviewed commit. Override with KSU_REF=legacy for latest.
+[ -z $KSU_REF ] && KSU_REF="e5f5ec998"
 [ -z $SUSFS_KSU_REPO ] && SUSFS_KSU_REPO="https://raw.githubusercontent.com/rifsxd/KernelSU-Next/next/kernel/setup.sh"
 [ -z $DEVICE ] && DEVICE="Unknown"
 
@@ -151,7 +153,7 @@ fi
 if [ "$SUSFS4KSU" = "true" ]; then
 	curl -LSs $DEFAULT_KSU_REPO | bash -s legacy_susfs
 else
-    [ "$KERNELSU" = "true" ] && curl -LSs $DEFAULT_KSU_REPO | bash -s legacy || pr_info "KernelSU Next is disabled. Add 'KERNELSU=true' or 'export KERNELSU=true' to enable"
+    [ "$KERNELSU" = "true" ] && curl -LSs $DEFAULT_KSU_REPO | bash -s $KSU_REF || pr_info "KernelSU Next is disabled. Add 'KERNELSU=true' or 'export KERNELSU=true' to enable"
 fi
 
 BUILD_TARGET="$1"
@@ -353,7 +355,7 @@ if [ "$BUILD" = "kernel" ]; then
 		setconfig enable THREAD_INFO_IN_TASK
 		setconfig enable KSU_TAMPER_SYSCALL_TABLE
     else
-        [ "$KERNELSU" = "true" ] && echo "KernelSU Enabled" && setconfig enable KSU
+        [ "$KERNELSU" = "true" ] && echo "KernelSU Enabled" && setconfig enable KSU && setconfig enable KSU_MANUAL_HOOK
     fi
 
     # Apply LTO configuration if enabled

@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        variant: ["Vanilla", "KernelSU Next", "KernelSU Next + SUSFS"] # Primitive values only
+        variant: ["Vanilla", "KernelSU Next"] # Primitive values only
 
     steps:
     - uses: actions/checkout@v4
