@@ -409,6 +409,13 @@ void tcp_ca_openreq_child(struct sock *sk, const struct dst_entry *dst)
 	u32 ca_key = dst_metric(dst, RTAX_CC_ALGO);
 	bool ca_got_dst = false;
 
+	/* The child is a copy of the listener, including icsk_ca_priv. A
+	 * congestion control that keeps a pointer there (BBR in this tree)
+	 * must not see the listener's pointer; init() runs later for the
+	 * child anyway.
+	 */
+	memset(icsk->icsk_ca_priv, 0, sizeof(icsk->icsk_ca_priv));
+
 	tcp_set_ecn_low_from_dst(sk, dst);
 
 	if (ca_key != TCP_CA_UNSPEC) {

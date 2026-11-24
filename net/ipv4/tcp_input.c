@@ -941,7 +941,7 @@ static void tcp_sum_lost(struct tcp_sock *tp, struct sk_buff *skb)
 	if (!(sacked & TCPCB_LOST) ||
 	    ((sacked & TCPCB_LOST) && (sacked & TCPCB_SACKED_RETRANS))) {
 		tp->lost += tcp_skb_pcount(skb);
-		if (ca_ops->skb_marked_lost)
+		if ((ca_ops->flags & TCP_CONG_EXT_OPS) && ca_ops->skb_marked_lost)
 			ca_ops->skb_marked_lost(sk, skb);
 	}
 }

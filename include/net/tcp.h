@@ -1047,9 +1047,17 @@ enum tcp_ca_ack_event_flags {
 #define TCP_CONG_NEEDS_ECN	0x2
 /* Wants notification of CE events (CA_EVENT_ECN_IS_CE, CA_EVENT_ECN_NO_CE). */
 #define TCP_CONG_WANTS_CE_EVENTS	0x4
+/* The ops implement tso_segs() and skb_marked_lost() (BBRv3 backport).
+ * Prebuilt modules (e.g. Samsung's tcp_htcp.ko and tcp_westwood.ko) were
+ * built against the old struct tcp_congestion_ops, which ends before
+ * skb_marked_lost and has min_tso_segs(sk) where tso_segs now is. The
+ * kernel only uses those two members when this flag is set.
+ */
+#define TCP_CONG_EXT_OPS	0x8
 #define TCP_CONG_MASK	(TCP_CONG_NON_RESTRICTED | \
 			 TCP_CONG_NEEDS_ECN | \
-			 TCP_CONG_WANTS_CE_EVENTS)
+			 TCP_CONG_WANTS_CE_EVENTS | \
+			 TCP_CONG_EXT_OPS)
 
 union tcp_cc_info;
 
@@ -1116,10 +1124,6 @@ struct tcp_congestion_ops {
 	void (*pkts_acked)(struct sock *sk, const struct ack_sample *sample);
 	/* pick target number of segments per TSO/GSO skb (optional): */
 	u32 (*tso_segs)(struct sock *sk, unsigned int mss_now);
-
-	/* react to a specific lost skb (optional) */
-	void (*skb_marked_lost)(struct sock *sk, const struct sk_buff *skb);
-
 	/* returns the multiplier used in tcp_sndbuf_expand (optional) */
 	u32 (*sndbuf_expand)(struct sock *sk);
 	/* call when packets are delivered to update cwnd and pacing rate,
@@ -1132,6 +1136,11 @@ struct tcp_congestion_ops {
 
 	char 		name[TCP_CA_NAME_MAX];
 	struct module 	*owner;
+
+	/* react to a specific lost skb (optional). Kept at the end so the
+	 * existing members keep their offsets.
+	 */
+	void (*skb_marked_lost)(struct sock *sk, const struct sk_buff *skb);
 };
 
 int tcp_register_congestion_control(struct tcp_congestion_ops *type);
